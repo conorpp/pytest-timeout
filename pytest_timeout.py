@@ -194,6 +194,7 @@ def timeout_setup(item):
         return
 
     timeout_method = params.method
+    original_testfunc = item.function
     if (
         timeout_method == "signal"
         and threading.current_thread() is not threading.main_thread()
@@ -202,39 +203,45 @@ def timeout_setup(item):
 
     if timeout_method == "signal":
 
-        def handler(signum, frame):
-            __tracebackhide__ = True
-            timeout_sigalrm(item, params.timeout)
 
-        def cancel():
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        def new_testfunc(*args,**kwargs):
+            def handler(signum, frame):
+                __tracebackhide__ = True
+                timeout_sigalrm(item, params.timeout)
 
-        item.cancel_timeout = cancel
-        signal.signal(signal.SIGALRM, handler)
-        signal.setitimer(signal.ITIMER_REAL, params.timeout)
+            def cancel():
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+            signal.signal(signal.SIGALRM, handler)
+            signal.setitimer(signal.ITIMER_REAL, params.timeout)
+
+            original_testfunc(*args,**kwargs)
+
+            cancel()
+
     elif timeout_method == "thread":
-        timer = threading.Timer(params.timeout, timeout_timer, (item, params.timeout))
-        timer.name = "%s %s" % (__name__, item.nodeid)
+        def new_testfunc(*args,**kwargs):
+            def cancel():
+                timer.cancel()
+                timer.join()
 
-        def cancel():
-            timer.cancel()
-            timer.join()
+            timer = threading.Timer(params.timeout, timeout_timer, (item, params.timeout))
+            timer.name = "%s %s" % (__name__, item.nodeid)
+            timer.start()
 
-        item.cancel_timeout = cancel
-        timer.start()
+            original_testfunc(*args,**kwargs)
+
+            cancel()
+
+    # Overwrite the test function with our timeout wrapper.
+    for key in item.__dict__:
+        if item.__dict__[key] == item.function:
+            item.__dict__[key] = new_testfunc
 
 
 def timeout_teardown(item):
-    """Cancel the timeout trigger if it was set."""
-    # When skipping is raised from a pytest_runtest_setup function
-    # (as is the case when using the pytest.mark.skipif marker) we
-    # may be called without our setup counterpart having been
-    # called.
-    cancel = getattr(item, "cancel_timeout", None)
-    if cancel:
-        cancel()
-
+    pass
 
 def get_env_settings(config):
     """Return the configured timeout settings.
